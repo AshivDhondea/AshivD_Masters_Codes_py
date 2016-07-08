@@ -8,10 +8,16 @@
 # Edits:
 # 21/06/2016 : cleaned up array indices in fnKepler_J2_augmented.
 # 23/06/16 : fixed function fnKepler_J2_augmented. Validated against its MATLAB counterpart.
+# 23/06/16: added in 3 functions for polynomial models. (i.e. kinematic models).
+# 7 July 2016: added function to generate nominal trajectory for Two-Body problem. 
 # ------------------------- #
 # Import libraries
 import numpy as np
+from numpy import linalg
+import scipy
+# Ashiv's own libraries
 import AstroConstants as AstCnst
+import Num_Integ as ni
 # -------------------------------------------------------------------- #
 def fnKepler_J2(t,X):
     # emulates fnKepler_J2.m. 20 June 2016
@@ -66,3 +72,41 @@ def fnKepler_J2_augmented(t,X):
     Xdot[6:6+6*6+1] = np.reshape(PhiDot,6*6);
     return Xdot
 
+def fnGenerate_Nominal_Trajectory(Xdash,timevec):
+    dt = timevec[1]-timevec[0];
+    Xstate = np.zeros([6+6*6,len(timevec)],dtype=np.float64);
+    Xstate[0:6,0] = Xdash;
+    Xstate[6:,0] = np.reshape(np.eye(6,dtype=np.float64),6*6);
+    
+    for index in range(1,len(timevec)):
+        # Perform RK4 numerical integration on the J2-perturbed dynamics.
+        Xstate[:,index] = ni.fnRK4_vector(fnKepler_J2_augmented,dt,Xstate[:,index-1],timevec[index-1]);
+    return Xstate
+# --------------------------------------------------------------------------------------------#
+## Polynomial model functions
+def fn_Generate_STM_polynom(zeta,nStates):
+    # fn_Generate_STM_polynom creates the state transition matrix for polynomial models 
+    # of degree (nStates-1) over a span of transition of zeta [s].
+    # Polynomial models are a subset of the class of constant-coefficient linear DEs.
+    # Refer to: Tracking Filter Engineering, Norman Morrison.
+    stm = np.eye(nStates,dtype=float);
+    for yindex in range (0,nStates):
+        for xindex in range (yindex,nStates): # STM is upper triangular
+            stm[yindex,xindex] = np.power(zeta,xindex-yindex)/float(math.factorial(xindex-yindex));
+    return stm;     
+
+def fn_Generate_STM_polynom_3D(zeta,nStates,dimensionality):
+    # fn_Generate_STM_polynom_3D generates the full state transition matrix for 
+    # the required dimensionality.
+    stm = fn_Generate_STM_polynom(dt,nStates);
+    stm3 = fn_Create_Concatenated_Block_Diag_Matrix(stm,dimensionality-1);
+    return stm3;
+
+def fn_Create_Concatenated_Block_Diag_Matrix(R,stacklen):
+    # fn_Create_Concatenated_Block_Diag_Matrix creates a block diagonal matrix of size (stacklen) x (stacklen)
+    # whose diagonal blocks are copies of the matrix R.
+    L = [R]; 
+    for index in range (0,stacklen):
+        L.append(R);
+        ryn = scipy.linalg.block_diag(*L);
+    return ryn;
