@@ -15,6 +15,10 @@
 # 21 July 2016: modified fnUT_sigmas. Numpy's Cholesky decomposition only deals with positive definite matrices.
 #               However, the covariance matrix may become positive semidefinite. This is why schol from ekfukf toolbox was implemented to decompose PSD matrices.
 # 22 July 2016: created the function fnCD_UKF_predict_M for CD-UKF predict step: integrating the sigma points through the dynamics function by RK4
+# 24 July 2016: changed all numpy arrays of type float to np.float64.
+# 29 July 2016: cleaned up code for the fnCD_EKF_predict_STM_RK4, included function call to generate STM in DynFn.
+# 31 July 2016: created the function fnCD_EKF which can call the various versions of the CD-EKF.
+# 31 July 2016: cleaned up all the CD-EKF functions.
 # ------------------------- #
 # Theoretical background:
 # 1. Tracking Filter Engineering, Norman Morrison. 2013 aka TFE
@@ -34,13 +38,13 @@
       publisher={IEEE}
     } """
 """ Based on "Cubature Kalman filters for continuous-time dynamic models Part II: A solution based on moment matching"
-@INPROCEEDINGS{6875583, 
-author={D. F. Crouse}, 
-booktitle={2014 IEEE Radar Conference}, 
-title={Cubature Kalman filters for continuous-time dynamic models Part II: A solution based on moment matching}, 
-year={2014}, 
-pages={0194-0199}, 
-month={May}
+    @INPROCEEDINGS{6875583, 
+    author={D. F. Crouse}, 
+    booktitle={2014 IEEE Radar Conference}, 
+    title={Cubature Kalman filters for continuous-time dynamic models Part II: A solution based on moment matching}, 
+    year={2014}, 
+    pages={0194-0199}, 
+    month={May}
 }"""
 # ------------------------- #
 # Import libraries
@@ -55,11 +59,11 @@ import MathsFunctions as MathsFn
 # ---------------------------------------- #
 ## Continuous-Discrete Filtering with the Extended Kalman Filter
 # MC-RK4 algorithm from Frogerais 2012
-def fnCD_EKF_predict_MC_RK4( m,P,dt,steps):
+def fnCD_EKF_predict_MC_RK4( m,P,dt,steps,Qc,L):
     # fnCD_EKF_predict_MC_RK4 implements the continuous-discrete extended Kalman Filter predict step.
     # This is the MC-RK4 method: Mean-Covariance Runge-Kutta 4th order
     # m is the mean, P is the covariance matrix.
-    # Q is the process noise matrix, L is the dispersion matrix.
+    # Qc is the process noise matrix, L is the dispersion matrix.
     # steps = Number of steps in the RK4 integration
     # dt = time interval from k to k+1.
 
@@ -72,7 +76,7 @@ def fnCD_EKF_predict_MC_RK4( m,P,dt,steps):
 
     for index in range(1,len(td)):
         # Perform RK4 numerical integration on the system of differential equations for the moment.
-        moment_vector[:,index] = ni.fnRK4_vector(DynFn.fnMoment_DE,dt/steps,moment_vector[:,index-1],td[index-1]);
+        moment_vector[:,index] = ni.fnRK4_vector(DynFn.fnMoment_DE,dt/steps,moment_vector[:,index-1],td[index-1],Qc,L);
         
     # Extract the last mean vector and covariance matrix. These correspond to the mean vector and covariance matrix at time index k+1.
     m_pred = moment_vector[0:6,len(td)-1];
@@ -81,91 +85,12 @@ def fnCD_EKF_predict_MC_RK4( m,P,dt,steps):
     # matrix at the current time step before seeing the measurement.
     return m_pred, P_pred
 
-# D-Euler algorithm from Frogerais 2012
-def fnCD_EKF_predict_D_Euler( m,P,dt,L,Q):
-    # fnCD_EKF_predict_D_Euler implements the extended Kalman Filter predict step for Continuous-Discrete Filtering by the D-Euler method.
-    # F is the nonlinear dynamics function.
-    # A is the Jacobian of the function F evaluated at m.
-    # m is the mean, P is the covariance matrix.
-    # process noise: Q matrix
-
-    m_pred = m + dt*DynFn.fnKepler_J2(dt,m);
-    A = DynFn.fnJacobian_Kepler_J2(m);
-    # D-Euler method approximates the STM by (I + A*dt)
-    pseudo_stm = np.eye(6,dtype=np.float64) + dt*A;
-    P_pred = np.add(np.dot(np.dot(pseudo_stm,P),np.transpose(pseudo_stm)),np.dot(np.dot(L,Q),np.transpose(L)));
-    # m_pred and P_pred are the predicted mean state vector and covariance
-    # matrix at the current time step before seeing the measurement.
-    return m_pred, P_pred
-
-# D-SRK2 algorithm from Frogerais 2012
-def fnCD_EKF_predict_D_SRK2( m,P,dt,L,Q):
-    # fnCD_EKF_predict_D_SRK2 implements the extended Kalman Filter predict step for Continuous-Discrete Filtering by the D-SRK2 method.
-    # F is the nonlinear dynamics function.
-    # A is the Jacobian of the function F evaluated at m.
-    # m is the mean, P is the covariance matrix.
-    # process noise: Q matrix
-
-    # Heun integration
-    k1 = DynFn.fnKepler_J2(dt,m); # fnKepler_J2 does not explicitly contain dt, so it is not critical to have the correct expression for time
-    k2 = DynFn.fnKepler_J2(dt,m + dt*k1);
-    J1x = DynFn.fnJacobian_Kepler_J2(m);
-    J2x = np.dot(DynFn.fnJacobian_Kepler_J2(m+dt*k1),(np.eye(6,dtype=np.float64) + dt*J1x));
-    J1w = L/dt;
-    J2w = np.dot(DynFn.fnJacobian_Kepler_J2(m+dt*k1),dt*J1w);
-
-    # Heun. See Frogerais 2012
-    m_pred = m + (dt/2)*(k1 + k2);
-    
-    # D-SRK2 method approximates the STM by (I + 0.5*(J1x+J2x)*dt)
-    pseudo_stm = np.eye(6,dtype=np.float64) + 0.5*dt*(J1x+J2x);
-    JacL = 0.5*dt*(J1w + J2w);
-    P_pred = np.add(np.dot(np.dot(pseudo_stm,P),np.transpose(pseudo_stm)),np.dot(np.dot(JacL,Q),np.transpose(JacL)));
-    # m_pred and P_pred are the predicted mean state vector and covariance
-    # matrix at the current time step before seeing the measurement.
-    return m_pred, P_pred
-
-# D-SRK4 algorithm from Frogerais 2012
-def fnCD_EKF_predict_D_SRK4( m,P,dt,L,Q):
-    # fnCD_EKF_predict_D_SRK4 implements the extended Kalman Filter predict step for Continuous-Discrete Filtering by the D-SRK2 method.
-    # F is the nonlinear dynamics function.
-    # A is the Jacobian of the function F evaluated at m.
-    # m is the mean, P is the covariance matrix.
-    # process noise: Q matrix
-
-    # Stochastic Runge-Kutta 4 integration
-    k1 = DynFn.fnKepler_J2(dt,m); # fnKepler_J2 does not explicitly contain dt, so it is not critical to have the correct expression for time
-    k2 = DynFn.fnKepler_J2(dt,m + 0.5*dt*k1);
-    k3 = DynFn.fnKepler_J2(dt,m + 0.5*dt*k2);
-    k4 = DynFn.fnKepler_J2(dt,m +     dt*k3);
-    
-    J1x = DynFn.fnJacobian_Kepler_J2(m);
-    J2x = np.dot(DynFn.fnJacobian_Kepler_J2(m+0.5*dt*k1),(np.eye(6,dtype=np.float64) + 0.5*dt*J1x));
-    J3x = np.dot(DynFn.fnJacobian_Kepler_J2(m+0.5*dt*k2),(np.eye(6,dtype=np.float64) + 0.5*dt*J2x));
-    J4x = np.dot(DynFn.fnJacobian_Kepler_J2(m+    dt*k3),(np.eye(6,dtype=np.float64) +     dt*J3x));
-
-    J1w = L/dt;
-    J2w = np.dot(DynFn.fnJacobian_Kepler_J2(m+0.5*dt*k1),0.5*dt*J1w);
-    J3w = np.dot(DynFn.fnJacobian_Kepler_J2(m+0.5*dt*k2),0.5*dt*J2w);
-    J4w = np.dot(DynFn.fnJacobian_Kepler_J2(m+    dt*k3),    dt*J3w);
-
-    # Runge-Kutta 4th order method. See Frogerais 2012
-    m_pred = m + (dt/6)*(k1 + 2*k2 + 2*k3 + k4);
-    
-    # D-SRK4 method approximates the STM by this
-    pseudo_stm = np.eye(6,dtype=np.float64) + (1/6.0)*dt*(J1x+2*J2x+2*J3x+J4x);
-    JacL = (1/6.0)*dt*(J1w + 2*J2w + 2*J3w + J4w);
-    P_pred = np.add(np.dot(np.dot(pseudo_stm,P),np.transpose(pseudo_stm)),np.dot(np.dot(JacL,Q),np.transpose(JacL)));
-    # m_pred and P_pred are the predicted mean state vector and covariance
-    # matrix at the current time step before seeing the measurement.
-    return m_pred, P_pred
-
 # MF-RK4 algorithm from Frogerais 2012
-def fnCD_EKF_predict_STM_RK4( m,P,L,Q,dt,steps):
+def fnCD_EKF_predict_STM_RK4( m,P,dt,steps,Qc,L):
     # fnCD_EKF_predict_STM_RK4 implements the continuous-discrete extended Kalman Filter predict step.
     # This is the STM-RK4 method: State Transition Matrix propagation by Runge-Kutta 4th order method.
     # m is the mean, P is the covariance matrix.
-    # Q is the process noise matrix, L is the dispersion matrix.
+    # Qc is the process noise matrix, L is the dispersion matrix.
     # steps = Number of steps in the RK4 integration
     # dt = time interval from k to k+1.
 
@@ -173,22 +98,121 @@ def fnCD_EKF_predict_STM_RK4( m,P,L,Q,dt,steps):
     td = np.arange(0,dt+dt/steps,dt/steps,dtype=np.float64);
     # augmented state vector contains the state vector and stm which need to be integrated.
     x_aug = np.zeros((6 + 6*6,len(td)),dtype = np.float64);
-    x_aug[0:6,0] = m; # mean vector
-    stm_ini = np.eye(6,dtype=np.float64); # initial state transition matrix is identity matrix, by definition.
-    x_aug[6:,0] = np.reshape(stm_ini,6*6); # covariance matrix 
 
-    for index in range(1,len(td)):
-        # Perform RK4 numerical integration on the system of differential equations
-        x_aug[:,index] = ni.fnRK4_vector(DynFn.fnKepler_J2_augmented,dt/steps,x_aug[:,index-1],td[index-1]);
-        
+    x_aug = DynFn.fnGenerate_Nominal_Trajectory(m,td);    
     # Extract the last mean vector and covariance matrix. These correspond to the mean vector and covariance matrix at time index k+1.
     m_pred = x_aug[0:6,len(td)-1];
     stm_end = np.reshape(x_aug[6:,len(td)-1],(6,6));
-    Gamma = np.dot(stm_end,L); # Refer to SOD pg 228. We can do this because L = constant.
-    P_pred = np.dot(stm_end,np.dot(P,np.transpose(stm_end))) + np.dot(Gamma,np.dot(Q,np.transpose(Gamma)));
+    #Gamma = np.dot(stm_end,L); # Refer to SOD pg 228. We can do this because L = constant.
+    P_pred = np.dot(stm_end,np.dot(P,np.transpose(stm_end))) ;#+ np.dot(Gamma,np.dot(Qc,np.transpose(Gamma)));
     # m_pred and P_pred are the predicted mean state vector and covariance
     # matrix at the current time step before seeing the measurement.
     return m_pred, P_pred
+
+# D-Euler algorithm from Frogerais 2012
+def fnCD_EKF_predict_D_Euler( m,P,dt,steps,Qc,L):
+    # fnCD_EKF_predict_D_Euler implements the extended Kalman Filter predict step for Continuous-Discrete Filtering by the D-Euler method.
+    # F is the nonlinear dynamics function.
+    # A is the Jacobian of the function F evaluated at m.
+    # m is the mean, P is the covariance matrix.
+    # process noise: Q matrix
+    # Edited: 31/07/16: added a for loop so that multiple steps are taken from k to k+1
+    
+    m_pred = m;
+    P_pred = P;
+    Qd =  Qc*(dt/steps);
+    # time vector td to find the propagation of moment_vector from k to k+1
+    td = np.arange(0,dt+dt/steps,dt/steps,dtype=np.float64);
+    
+    for index in range (0,steps):
+        m_pred = m_pred + (dt/steps)*DynFn.fnKepler_J2(td[index],m_pred);
+        A = DynFn.fnJacobian_Kepler_J2(m_pred);
+        # D-Euler method approximates the STM by (I + A*dt)
+        pseudo_stm = np.eye(6,dtype=np.float64) + (dt/steps)*A;
+        P_pred = np.add(np.dot(np.dot(pseudo_stm,P_pred),np.transpose(pseudo_stm)),np.dot(np.dot(L,Qd),np.transpose(L)));
+
+    # m_pred and P_pred are the predicted mean state vector and covariance
+    # matrix at the current time step before seeing the measurement.
+    return m_pred, P_pred
+
+# D-SRK2 algorithm from Frogerais 2012
+def fnCD_EKF_predict_D_SRK2( m,P,dt,steps,Qc,L):
+    # fnCD_EKF_predict_D_SRK2 implements the extended Kalman Filter predict step for Continuous-Discrete Filtering by the D-SRK2 method.
+    # F is the nonlinear dynamics function.
+    # A is the Jacobian of the function F evaluated at m.
+    # m is the mean, P is the covariance matrix.
+    # process noise: Q matrix
+    # Edited: 31/07/16: added a for loop so that multiple steps are taken from k to k+1
+
+    m_pred = m;
+    P_pred = P;
+    Qd =  Qc*(dt/steps);
+    # time vector td to find the propagation of moment_vector from k to k+1
+    td = np.arange(0,dt+dt/steps,dt/steps,dtype=np.float64);
+    
+    for index in range (0,steps):
+        # Heun integration
+        k1 = DynFn.fnKepler_J2(td[index],m_pred); # fnKepler_J2 does not explicitly contain dt, so it is not critical to have the correct expression for time
+        k2 = DynFn.fnKepler_J2(td[index],m_pred + (dt/steps)*k1);
+        J1x = DynFn.fnJacobian_Kepler_J2(m_pred);
+        J2x = np.dot(DynFn.fnJacobian_Kepler_J2(m_pred+(dt/steps)*k1),(np.eye(6,dtype=np.float64) + (dt/steps)*J1x));
+        J1w = L/(dt/steps);
+        J2w = np.dot(DynFn.fnJacobian_Kepler_J2(m_pred+(dt/steps)*k1),(dt/steps)*J1w);
+
+        # Heun. See Frogerais 2012
+        m_pred = m_pred + ((dt/steps)/2)*(k1 + k2);
+    
+        # D-SRK2 method approximates the STM by (I + 0.5*(J1x+J2x)*dt)
+        pseudo_stm = np.eye(6,dtype=np.float64) + 0.5*(dt/steps)*(J1x+J2x);
+        JacL = 0.5*(dt/steps)*(J1w + J2w);
+        P_pred = np.add(np.dot(np.dot(pseudo_stm,P_pred),np.transpose(pseudo_stm)),np.dot(np.dot(JacL,Qd),np.transpose(JacL)));
+        # m_pred and P_pred are the predicted mean state vector and covariance
+        # matrix at the current time step before seeing the measurement.
+    return m_pred, P_pred
+
+# D-SRK4 algorithm from Frogerais 2012
+def fnCD_EKF_predict_D_SRK4( m,P,dt,steps,Qc,L):
+    # fnCD_EKF_predict_D_SRK4 implements the extended Kalman Filter predict step for Continuous-Discrete Filtering by the D-SRK2 method.
+    # F is the nonlinear dynamics function.
+    # A is the Jacobian of the function F evaluated at m.
+    # m is the mean, P is the covariance matrix.
+    # process noise: Q matrix
+    
+    m_pred = m;
+    P_pred = P;
+    Qd =  Qc*(dt/steps);
+    # time vector td to find the propagation of moment_vector from k to k+1
+    td = np.arange(0,dt+dt/steps,dt/steps,dtype=np.float64);
+
+    for index in range (0,steps):
+        # Stochastic Runge-Kutta 4 integration
+        k1 = DynFn.fnKepler_J2(td[index],m_pred); # fnKepler_J2 does not explicitly contain dt, so it is not critical to have the correct expression for time
+        k2 = DynFn.fnKepler_J2(td[index],m_pred + 0.5*(dt/steps)*k1);
+        k3 = DynFn.fnKepler_J2(td[index],m_pred + 0.5*(dt/steps)*k2);
+        k4 = DynFn.fnKepler_J2(td[index],m_pred +     (dt/steps)*k3);
+    
+        J1x = DynFn.fnJacobian_Kepler_J2(m_pred);
+        J2x = np.dot(DynFn.fnJacobian_Kepler_J2(m_pred+0.5*(dt/steps)*k1),(np.eye(6,dtype=np.float64) + 0.5*(dt/steps)*J1x));
+        J3x = np.dot(DynFn.fnJacobian_Kepler_J2(m_pred+0.5*(dt/steps)*k2),(np.eye(6,dtype=np.float64) + 0.5*(dt/steps)*J2x));
+        J4x = np.dot(DynFn.fnJacobian_Kepler_J2(m_pred+    (dt/steps)*k3),(np.eye(6,dtype=np.float64) +     (dt/steps)*J3x));
+
+        J1w = L/(dt/steps);
+        J2w = np.dot(DynFn.fnJacobian_Kepler_J2(m_pred+0.5*(dt/steps)*k1),0.5*(dt/steps)*J1w);
+        J3w = np.dot(DynFn.fnJacobian_Kepler_J2(m_pred+0.5*(dt/steps)*k2),0.5*(dt/steps)*J2w);
+        J4w = np.dot(DynFn.fnJacobian_Kepler_J2(m_pred+    (dt/steps)*k3),    (dt/steps)*J3w);
+
+        # Runge-Kutta 4th order method. See Frogerais 2012
+        m_pred = m_pred + ((dt/steps)/6)*(k1 + 2*k2 + 2*k3 + k4);
+    
+        # D-SRK4 method approximates the STM by this
+        pseudo_stm = np.eye(6,dtype=np.float64) + (1/2.0)*(dt/steps)*(J1x+2*J2x+2*J3x+J4x);
+        JacL = (1/2.0)*(dt/steps)*(J1w + 2*J2w + 2*J3w + J4w);
+        P_pred = np.add(np.dot(np.dot(pseudo_stm,P_pred),np.transpose(pseudo_stm)),np.dot(np.dot(JacL,Qd),np.transpose(JacL)));
+
+    # m_pred and P_pred are the predicted mean state vector and covariance
+    # matrix at the current time step before seeing the measurement.
+    return m_pred, P_pred
+
 ########################################################################################################
 def fnEKF_predict_kinematic( F,A, m, P, Q):
     # fnEKF_predict_kinematic implements the extended Kalman Filter predict step for kinematic filtering.
@@ -217,8 +241,8 @@ def fnEKF_update_kinematic(m_minus, P_minus, y,H,M, R ):
     return m,P
 
 def fnEKF_predict_dynamic( F,A, m, P, Q):
-    # fnKF_predict implements the extended Kalman Filter predict step.
-    # F is the nonlinear dynamics function.
+    # fnKF_predict implements the extended Kalman Filter predict step. DD-EKF
+    # F is the nonlinear discrete-time dynamics function.
     # A is the Jacobian of the function F evaluated at m.
     # m is the mean, P is the covariance matrix.
     # process noise: Q matrix
@@ -227,18 +251,86 @@ def fnEKF_predict_dynamic( F,A, m, P, Q):
     # m_pred and P_pred are the predicted mean state vector and covariance
     # matrix at the current time step before seeing the measurement.
     return m_pred, P_pred
+
+########################################################################################################
+def fnCD_EKF(m,P,Xradar,R,t_y,steps,Qc,L,option):
+    # arrays to hold estimates.
+    x_hat = np.zeros([6,len(t_y)],dtype=np.float64);
+    P_hat = np.zeros([6,6,len(t_y)],dtype=np.float64);
+    x_hat[:,0] = m;
+    P_hat[:,:,0] = P;
+    
+    # Measurement matrix for update step.
+    M = np.zeros([3,6],dtype=np.float64);
+    del_y = float(t_y[1]-t_y[0]);
+    # --------------------------------------------------------- #
+    ## Filtering
+    if option == '1':
+        for index in range(1,len(t_y)):
+            m_pred,P_pred  =fnCD_EKF_predict_MC_RK4( m,P,del_y,steps,Qc,L);
+            
+            pos = np.array([m_pred[0],m_pred[1],m_pred[2]],dtype=np.float64);
+            Htilde = Obs.fnJacobianH(pos);  
+            M[:,0] = Htilde[:,0]; M[:,1] =Htilde[:,1];M[:,2] =Htilde[:,2];
+            m,P = fnEKF_update_kinematic(m_pred, P_pred, Xradar[:,index],Obs.fnH(pos),M, R );
+
+            x_hat[:,index] = m;
+            P_hat[:,:,index]  = P;
+    elif option == '2':
+        for index in range(1,len(t_y)):
+            m_pred,P_pred  =fnCD_EKF_predict_STM_RK4( m,P,del_y,steps,Qc,L);
+            pos = np.array([m_pred[0],m_pred[1],m_pred[2]],dtype=np.float64);
+            Htilde = Obs.fnJacobianH(pos);  
+            M[:,0] = Htilde[:,0]; M[:,1] =Htilde[:,1];M[:,2] =Htilde[:,2];
+            m,P = fnEKF_update_kinematic(m_pred, P_pred, Xradar[:,index],Obs.fnH(pos),M, R );
+
+            x_hat[:,index] = m;
+            P_hat[:,:,index]  = P;
+    elif option  == '3':
+        for index in range(1,len(t_y)):
+            m_pred, P_pred = fnCD_EKF_predict_D_Euler( m,P,del_y,steps,Qc,L);            
+            pos = np.array([m_pred[0],m_pred[1],m_pred[2]],dtype=np.float64);
+            Htilde = Obs.fnJacobianH(pos);  
+            M[:,0] = Htilde[:,0]; M[:,1] =Htilde[:,1];M[:,2] =Htilde[:,2];
+            m,P = fnEKF_update_kinematic(m_pred, P_pred, Xradar[:,index],Obs.fnH(pos),M, R );
+
+            x_hat[:,index] = m;
+            P_hat[:,:,index]  = P;
+    elif option  == '4':
+        for index in range(1,len(t_y)):
+            m_pred, P_pred  =fnCD_EKF_predict_D_SRK2( m,P,del_y,steps,Qc,L);
+            pos = np.array([m_pred[0],m_pred[1],m_pred[2]],dtype=np.float64);
+            Htilde = Obs.fnJacobianH(pos);  
+            M[:,0] = Htilde[:,0]; M[:,1] =Htilde[:,1];M[:,2] =Htilde[:,2];
+            m,P = fnEKF_update_kinematic(m_pred, P_pred, Xradar[:,index],Obs.fnH(pos),M, R );
+
+            x_hat[:,index] = m;
+            P_hat[:,:,index]  = P;
+    elif option  == '5':
+        for index in range(1,len(t_y)):
+            m_pred, P_pred  =fnCD_EKF_predict_D_SRK4( m,P,del_y,steps,Qc,L);
+            pos = np.array([m_pred[0],m_pred[1],m_pred[2]],dtype=np.float64);
+            Htilde = Obs.fnJacobianH(pos);  
+            M[:,0] = Htilde[:,0]; M[:,1] =Htilde[:,1];M[:,2] =Htilde[:,2];
+            m,P = fnEKF_update_kinematic(m_pred, P_pred, Xradar[:,index],Obs.fnH(pos),M, R );
+
+            x_hat[:,index] = m;
+            P_hat[:,:,index]  = P;
+        
+    return x_hat,P_hat
+
 ########################################################################################################
 ## Unscented Kalman Filter Functions 
 def fnUT_sigmas(X,P,params_vec):
     # Implementation of ut_sigmas.m of the ekfukf toolbox
     #A = np.linalg.cholesky(P);
     A,definite = MathsFn.schol(P); # 21/07/16
-    if definite == -1:
-        print 'Covariance matrix is negative definite.'
-    elif definite == 0:
-        print 'Covariance matrix is positive semidefinite.'
-    else:
-        print 'Covariance matrix is positive definite.'
+##    if definite == -1:
+##        print 'Covariance matrix is negative definite.'
+##    elif definite == 0:
+##        print 'Covariance matrix is positive semidefinite.'
+##    else:
+##        print 'Covariance matrix is positive definite.'
     n = params_vec[3]; kappa = params_vec[2];
     sigmas = np.vstack((np.zeros_like(X),A ,-A) );
     c  = n + kappa;
@@ -313,8 +405,8 @@ def fnUKF_update_kinematic(m_minus, P_minus, y,fnH,R,params_vec):
         Y[:,index] = fnH(pos);
         mu = Wm[index]*Y[:,index];
 
-    Sk  = np.zeros([np.shape(yo)[0],np.shape(yo)[0]],dtype=float);
-    Ck  = np.zeros([n,np.shape(yo)[0]],dtype=float);
+    Sk  = np.zeros([np.shape(yo)[0],np.shape(yo)[0]],dtype=np.float64);
+    Ck  = np.zeros([n,np.shape(yo)[0]],dtype=np.float64);
     
     for index in range (0,2*n+1):
         diff = np.subtract(Y[:,index],mu);
@@ -333,16 +425,11 @@ def fnUKF_update_kinematic(m_minus, P_minus, y,fnH,R,params_vec):
     return m,P
 
 ## Continuous-Discrete Unscented Kalman Filtering ###################################
-def fnMoments_CD_UKF(t,xaug):
+def fnMoments_CD_UKF(t,xaug,Q,L):
     # Extract mean state vector and covariance matrix.
     x = xaug[0:6];
     P = np.reshape(xaug[6:],(6,6));
-    # Declare constants
-    dt = 0.1;
-    true_Qc = np.diag([2.4064e-6,2.4064e-6,2.4064e-6]) ;
-    Q = dt*true_Qc;
-    L = np.zeros([6,3],dtype=np.float64);
-    L[3,0] = 1.0; L[4,1]=1.0;L[5,2]=1.0;
+    
     # Define the UT parameters.
     alpha = 1;
     beta = 2;
@@ -360,33 +447,15 @@ def fnMoments_CD_UKF(t,xaug):
         Y[:,index] = DynFn.fnKepler_J2(t,sigmas[index,:]);
 
     mdot = np.dot(Y,Wm);
-    print 'Wm'
-    print Wm
+    
     sigma_matrix = np.tile(np.transpose(Wm),(2*n+1,1));
-    print 'sigma_matrix'
-    print sigma_matrix
-    print np.shape(sigma_matrix);
-
-    print 'Wc'
-    print np.shape(Wc);
     
     diff = np.eye(2*n+1,dtype=np.float64) - sigma_matrix;
     Wc_mat = np.diag(Wc);
 
-    print 'Wc_mat'
-    print np.shape(Wc_mat);
     W = np.dot(np.dot(diff,Wc_mat),diff.T);
 
-    print 'f(sigmas)'
-    print np.shape(Y); # n x 2n+1
-    print 'sigmas'
-    print np.shape(sigmas); # 2n+1 x n
-    print 'Wm'
-    print np.shape(Wm); # 2n+1
-    print 'W'
-    print np.shape(W);
-
-    Pdot = np.dot(np.dot(sigmas.T,W),np.transpose(Y)) + np.dot(np.dot(Y,W),sigmas) + np.dot(np.dot(L,true_Qc),L.T);
+    Pdot = np.dot(np.dot(sigmas.T,W),np.transpose(Y)) + np.dot(np.dot(Y,W),sigmas) + np.dot(np.dot(L,Q),L.T);
     # Ensure symmetry
     Pdot = 0.5*(Pdot+Pdot.T);
     # and positive semidefiniteness.
@@ -399,7 +468,7 @@ def fnMoments_CD_UKF(t,xaug):
     xaug[6:] = np.reshape(Pdot,6*6);
     return xaug
 
-def fnCD_UKF_predict_MC_RK4( m,P,dt,steps):
+def fnCD_UKF_predict_MC_RK4( m,P,dt,steps,Q,L):
     # fnCD_UKF_predict_MC_RK4 implements the continuous-discrete unscented Kalman Filter predict step.
     # This is the MC-RK4 method: Mean-Covariance Runge-Kutta 4th order
     # m is the mean, P is the covariance matrix.
@@ -416,13 +485,21 @@ def fnCD_UKF_predict_MC_RK4( m,P,dt,steps):
 
     for index in range(1,len(td)):
         # Perform RK4 numerical integration on the system of differential equations for the moment.
-        moment_vector[:,index] = ni.fnRK4_vector(fnMoments_CD_UKF,dt/steps,moment_vector[:,index-1],td[index-1]);
+        moment_vector[:,index] = ni.fnRK4_vector(fnMoments_CD_UKF,dt/steps,moment_vector[:,index-1],td[index-1],Q,L);
         
     # Extract the last mean vector and covariance matrix. These correspond to the mean vector and covariance matrix at time index k+1.
     m_pred = moment_vector[0:6,len(td)-1];
     P_pred = np.reshape(moment_vector[6:,len(td)-1],(6,6));
     # m_pred and P_pred are the predicted mean state vector and covariance
     # matrix at the current time step before seeing the measurement.
+
+    # Ensure symmetry
+    P_pred = 0.5*(P_pred+P_pred.T);
+    # and positive semidefiniteness.
+    S_pred,definite = MathsFn.schol(P_pred);
+    if definite != 1:
+        print 'Moment propagation made the covariance matrix not positive definite.'
+    P_pred = np.dot(S_pred,S_pred.T);
     return m_pred, P_pred
 
 def fnUKF_update_dynamic(m_minus, P_minus, y,fnH,R,params_vec):
@@ -444,8 +521,8 @@ def fnUKF_update_dynamic(m_minus, P_minus, y,fnH,R,params_vec):
         Y[:,index] = fnH(pos);
         mu = Wm[index]*Y[:,index];
 
-    Sk  = np.zeros([np.shape(yo)[0],np.shape(yo)[0]],dtype=float);
-    Ck  = np.zeros([n,np.shape(yo)[0]],dtype=float);
+    Sk  = np.zeros([np.shape(yo)[0],np.shape(yo)[0]],dtype=np.float64);
+    Ck  = np.zeros([n,np.shape(yo)[0]],dtype=np.float64);
     
     for index in range (0,2*n+1):
         diff = np.subtract(Y[:,index],mu);
@@ -461,6 +538,12 @@ def fnUKF_update_dynamic(m_minus, P_minus, y,fnH,R,params_vec):
     # Calculate estimated mean state vector and its covariance matrix.
     m = m_minus + np.dot(KalmanGain ,np.subtract(y,mu));
     P = np.subtract(P_minus,np.dot(np.dot(KalmanGain,Sk),np.transpose(KalmanGain)));
+
+    # Ensure symmetry
+    P = 0.5*(P+P.T);
+    # and positive semidefiniteness.
+    S,definite = MathsFn.schol(P);
+    P = np.dot(S,S.T);
     return m,P
 
 def fnCD_UKF_predict_M(m,P,dt,steps,L,true_Qc,params):
@@ -477,10 +560,10 @@ def fnCD_UKF_predict_M(m,P,dt,steps,L,true_Qc,params):
     ## Created: 22 July 2016
     
     # Form the sigma points of x
-    sigmas = Flt.fnUT_sigmas(m,P,params);
+    sigmas = fnUT_sigmas(m,P,params);
     
     # Compute weights
-    Wm,Wc = Flt.fnUT_weights(params);
+    Wm,Wc = fnUT_weights(params);
 
     # time vector td to find the propagation of moment_vector from k to k+1
     td = np.arange(0,dt+dt/steps,dt/steps,dtype=np.float64);
